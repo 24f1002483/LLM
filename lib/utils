@@ -1,0 +1,118 @@
+import fetch from 'node-fetch';
+
+/**
+ * Exponential backoff retry for API calls
+ */
+export async function postWithRetry(url, payload, maxAttempts = 5) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      console.log(`📤 Notifying evaluation API (attempt ${attempt + 1}/${maxAttempts})...`);
+      
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'User-Agent': 'Student-Deployment-System/1.0'
+        },
+        body: JSON.stringify(payload),
+        timeout: 30000
+      });
+      
+      if (response.ok) {
+        console.log('✅ Evaluation API notified successfully');
+        return true;
+      }
+      
+      const errorText = await response.text();
+      throw new Error(`HTTP ${response.status}: ${errorText}`);
+      
+    } catch (error) {
+      console.error(`❌ Attempt ${attempt + 1} failed:`, error.message);
+      
+      if (attempt === maxAttempts - 1) {
+        console.error('❌ Failed to notify evaluation API after all retries');
+        return false;
+      }
+      
+      const delay = Math.pow(2, attempt) * 1000;
+      console.log(`⏳ Retrying in ${delay / 1000}s...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
+/**
+ * Validate request payload
+ */
+export function validateRequest(payload) {
+  const required = ['email', 'secret', 'task', 'round', 'nonce', 'brief', 'evaluation_url'];
+  const missing = required.filter(field => !payload[field]);
+  
+  if (missing.length > 0) {
+    throw new Error(`Missing required fields: ${missing.join(', ')}`);
+  }
+  
+  if (payload.round !== 1 && payload.round !== 2) {
+    throw new Error('Round must be 1 or 2');
+  }
+  
+  if (typeof payload.brief !== 'string' || payload.brief.trim().length === 0) {
+    throw new Error('Brief must be a non-empty string');
+  }
+  
+  if (!isValidUrl(payload.evaluation_url)) {
+    throw new Error('Evaluation URL must be a valid URL');
+  }
+  
+  return true;
+}
+
+/**
+ * Validate URL format
+ */
+function isValidUrl(string) {
+  try {
+    new URL(string);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Process attachments from data URLs
+ */
+export function processAttachments(attachments, taskId) {
+  const processed = [];
+  
+  for (const attachment of attachments || []) {
+    if (attachment.url && attachment.url.startsWith('data:')) {
+      const matches = attachment.url.match(/^data:([^;]+);base64,(.+)$/);
+      if (matches) {
+        const [_, mimeType, base64Data] = matches;
+        processed.push({
+          name: attachment.name,
+          mimeType,
+          data: Buffer.from(base64Data, 'base64')
+        });
+      }
+    }
+  }
+  
+  console.log(`📎 Processed ${processed.length} attachments for task ${taskId}`);
+  return processed;
+}
+
+/**
+ * Validate environment variables
+ */
+export function validateEnvironment() {
+  const required = ['GITHUB_TOKEN', 'GITHUB_USERNAME', 'STUDENT_SECRET'];
+  const missing = required.filter(key => !process.env[key]);
+  
+  if (missing.length > 0) {
+    throw new Error(`Missing environment variables: ${missing.join(', ')}`);
+  }
+  
+  return true;
+}
