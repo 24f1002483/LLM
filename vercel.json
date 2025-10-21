@@ -13,7 +13,7 @@
       "dest": "/api/task.js"
     },
     {
-      "src": "/(.*)",
+      "src": "/",
       "dest": "/api/task.js"
     }
   ]
