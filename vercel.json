@@ -2,19 +2,14 @@
   "version": 2,
   "builds": [
     {
-      "src": "api/task.js",
-      "use": "@vercel/node"
+      "src": "app.py",
+      "use": "@vercel/python"
     }
   ],
   "routes": [
     {
-      "src": "/api/task",
-      "methods": ["GET", "POST", "OPTIONS"],
-      "dest": "/api/task.js"
-    },
-    {
-      "src": "/",
-      "dest": "/api/task.js"
+      "src": "/(.*)",
+      "dest": "app.py"
     }
   ]
 }
