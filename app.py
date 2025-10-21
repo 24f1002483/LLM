@@ -1,10 +1,8 @@
 import os
 import json
-import subprocess
 import time
 import requests
 import base64
-import shutil
 import re
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
@@ -13,7 +11,6 @@ from groq import Groq
 load_dotenv()
 app = Flask(__name__)
 
-import os
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 
@@ -25,87 +22,114 @@ client = Groq(api_key=GROQ_API_KEY)
 
 def sanitize_repo_name(name):
     """Convert task name to valid GitHub repository name"""
-    # Replace spaces and special characters with hyphens
     sanitized = re.sub(r'[^\w\-_.]', '-', name)
-    # Remove multiple consecutive hyphens
     sanitized = re.sub(r'-+', '-', sanitized)
-    # Remove leading/trailing hyphens
     sanitized = sanitized.strip('-')
-    # Ensure it's not empty
     if not sanitized:
         sanitized = "auto-generated-repo"
-    # Ensure it starts with a letter or number
     if not sanitized[0].isalnum():
         sanitized = "repo-" + sanitized
-    # Limit length to 100 characters
     if len(sanitized) > 100:
         sanitized = sanitized[:100]
-    
     return sanitized.lower()
 
-def run_command(cmd, check=True, shell=True):
-    """Run shell command with better error handling"""
-    try:
-        result = subprocess.run(cmd, shell=shell, capture_output=True, text=True, check=check)
-        if result.returncode != 0:
-            print(f"Command may have failed: {cmd}")
-            print(f"Stderr: {result.stderr}")
-        return result
-    except subprocess.CalledProcessError as e:
-        print(f"Command failed: {cmd}")
-        print(f"Error: {e.stderr}")
-        raise e
-
 def create_github_repo(repo_name):
-    """Create GitHub repository with proper error handling"""
+    """Create GitHub repository using GitHub API"""
     try:
-        # Check if repo already exists
-        check_cmd = f"gh repo view {GITHUB_USER}/{repo_name}"
-        result = run_command(check_cmd, check=False)
+        headers = {
+            'Authorization': f'token {GITHUB_TOKEN}',
+            'Accept': 'application/vnd.github.v3+json',
+        }
         
-        if result.returncode == 0:
+        # Check if repo exists
+        check_url = f'https://api.github.com/repos/{GITHUB_USER}/{repo_name}'
+        response = requests.get(check_url, headers=headers)
+        
+        if response.status_code == 200:
             print(f"Repository {repo_name} already exists")
             return True
-            
-        # Create new repository - CORRECTED COMMAND
-        create_cmd = f"gh repo create {repo_name} --public --confirm"
-        result = run_command(create_cmd)
         
-        if result.returncode == 0:
+        # Create new repository
+        create_url = 'https://api.github.com/user/repos'
+        data = {
+            'name': repo_name,
+            'description': f'Auto-generated repository for {repo_name}',
+            'private': False,
+            'auto_init': False,
+            'has_projects': False,
+            'has_wiki': False
+        }
+        
+        response = requests.post(create_url, headers=headers, json=data)
+        
+        if response.status_code == 201:
             print(f"Repository {repo_name} created successfully")
             return True
         else:
-            print(f"Failed to create repository. Error: {result.stderr}")
+            print(f"Failed to create repository: {response.status_code} - {response.text}")
             return False
-        
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to create repository: {e}")
-        print(f"Error details: {e.stderr}")
-        return False
-    except Exception as e:
-        print(f"Unexpected error creating repository: {e}")
-        return False
-        
-   
-
-def setup_local_repo(repo_name):
-    """Set up local git repository"""
-    try:
-        # Clone or initialize repo
-        if not os.path.exists(repo_name):
-            clone_cmd = f"git clone https://github.com/{GITHUB_USER}/{repo_name}.git"
-            run_command(clone_cmd)
-            print(f"Cloned repository {repo_name}")
-        else:
-            print(f"Directory {repo_name} already exists")
             
-        os.chdir(repo_name)
-        print(f"Changed to directory: {os.getcwd()}")
-        return True
-        
     except Exception as e:
-        print(f"Failed to setup local repo: {e}")
+        print(f"Failed to create repository: {e}")
         return False
+
+def create_file_in_repo(repo_name, file_path, content, commit_message):
+    """Create or update file in repository using GitHub API"""
+    try:
+        headers = {
+            'Authorization': f'token {GITHUB_TOKEN}',
+            'Accept': 'application/vnd.github.v3+json',
+        }
+        
+        url = f'https://api.github.com/repos/{GITHUB_USER}/{repo_name}/contents/{file_path}'
+        
+        # Check if file exists to get SHA for update
+        response = requests.get(url, headers=headers)
+        sha = None
+        if response.status_code == 200:
+            sha = response.json().get('sha')
+        
+        data = {
+            'message': commit_message,
+            'content': base64.b64encode(content.encode()).decode(),
+            'branch': 'main'
+        }
+        
+        if sha:
+            data['sha'] = sha
+        
+        response = requests.put(url, headers=headers, json=data)
+        
+        if response.status_code in [200, 201]:
+            print(f"Successfully created/updated {file_path}")
+            return True
+        else:
+            print(f"Failed to create {file_path}: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"Error creating file {file_path}: {e}")
+        return False
+
+def get_latest_commit_sha(repo_name):
+    """Get the latest commit SHA using GitHub API"""
+    try:
+        headers = {
+            'Authorization': f'token {GITHUB_TOKEN}',
+            'Accept': 'application/vnd.github.v3+json',
+        }
+        
+        url = f'https://api.github.com/repos/{GITHUB_USER}/{repo_name}/commits/main'
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            return response.json()['sha']
+        else:
+            print(f"Failed to get commit SHA: {response.status_code}")
+            return None
+    except Exception as e:
+        print(f"Error getting commit SHA: {e}")
+        return None
 
 @app.route('/api/task', methods=['POST'])
 def handle_request():
@@ -132,24 +156,11 @@ def handle_request():
         repo_name = sanitize_repo_name(task)
         print(f"Original task: '{task}' -> Sanitized repo name: '{repo_name}'")
         
-        original_dir = os.getcwd()  # Save original directory
-        
         print(f"Starting processing for repo: {repo_name}, round: {round_num}")
         
         try:
             if round_num == 1:
                 # Build Phase: Create new repo and generate app
-                # Parse attachments
-                attachment_files = {}
-                for att in attachments:
-                    if att['url'].startswith('data:image/png;base64,'):
-                        img_data = base64.b64decode(att['url'].split(',')[1])
-                        filename = att['name']
-                        # Save in original directory first
-                        with open(os.path.join(original_dir, filename), 'wb') as f:
-                            f.write(img_data)
-                        attachment_files[filename] = filename
-                        print(f"Saved attachment: {filename}")
                 
                 # Use Groq to generate minimal app code
                 prompt = f"""
@@ -166,7 +177,6 @@ def handle_request():
                 """
                 
                 print("Calling Groq API to generate app code...")
-                # Groq API call with current model
                 response = client.chat.completions.create(
                     model="llama-3.1-8b-instant",
                     messages=[
@@ -194,15 +204,9 @@ def handle_request():
                 if not create_github_repo(repo_name):
                     return jsonify({"error": "Failed to create GitHub repository"}), 500
                 
-                # Setup local repository
-                print("Setting up local repository...")
-                if not setup_local_repo(repo_name):
-                    return jsonify({"error": "Failed to setup local repository"}), 500
-                
                 # Add MIT license
                 print("Creating LICENSE file...")
-                with open('LICENSE', 'w') as f:
-                    f.write("""MIT License
+                license_content = """MIT License
 
 Copyright (c) 2023 Your Name
 
@@ -222,12 +226,14 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.""")
+SOFTWARE."""
+                
+                if not create_file_in_repo(repo_name, 'LICENSE', license_content, "Add MIT license"):
+                    return jsonify({"error": "Failed to create LICENSE file"}), 500
                 
                 # Write README.md
                 print("Creating README.md...")
-                with open('README.md', 'w') as f:
-                    f.write(f"""# {repo_name}
+                readme_content = f"""# {repo_name}
 
 ## Summary
 {brief}
@@ -245,44 +251,32 @@ The app uses HTML/JS to display and solve captchas. It defaults to the sample im
 
 ## License
 MIT
-""")
+"""
+                if not create_file_in_repo(repo_name, 'README.md', readme_content, "Add README"):
+                    return jsonify({"error": "Failed to create README.md"}), 500
                 
                 # Write app HTML
                 print("Creating index.html...")
-                with open('index.html', 'w') as f:
-                    f.write(app_html)
+                if not create_file_in_repo(repo_name, 'index.html', app_html, "Add web application"):
+                    return jsonify({"error": "Failed to create index.html"}), 500
                 
-                # Copy attachments using shutil (Windows compatible)
-                print("Copying attachments...")
-                for filename in attachment_files.values():
-                    source_path = os.path.join(original_dir, filename)
-                    if os.path.exists(source_path):
-                        shutil.copy2(source_path, '.')
-                        print(f"Copied {filename} to repository")
-                    else:
-                        print(f"Attachment file not found: {source_path}")
-                
-                # Configure git user if not configured
-                print("Configuring git...")
-                run_command('git config user.email "student@example.com"', check=False)
-                run_command('git config user.name "Student"', check=False)
-                
-                # Commit and push
-                print("Committing and pushing...")
-                run_command("git add .")
-                run_command('git commit -m "Initial commit"', check=False)  # Allow empty commit
-                run_command("git push origin main")
+                # Handle attachments via GitHub API
+                for att in attachments:
+                    if att['url'].startswith('data:image/png;base64,'):
+                        filename = att['name']
+                        print(f"Creating attachment: {filename}")
+                        # For base64 images, we can create them directly in the repo
+                        img_data = att['url'].split(',')[1]  # Get base64 data
+                        if create_file_in_repo(repo_name, filename, base64.b64decode(img_data).decode('latin-1'), f"Add {filename}"):
+                            print(f"Successfully created {filename}")
+                        else:
+                            print(f"Failed to create {filename}")
                 
                 print("GitHub Pages should be available automatically for public repositories")
             
             else:
                 # Revise Phase: Modify existing repo
                 print(f"Round {round_num}: Updating existing repository...")
-                if not setup_local_repo(repo_name):
-                    return jsonify({"error": "Failed to setup local repository"}), 500
-                
-                # Pull latest changes
-                run_command("git pull origin main")
                 
                 # Use Groq to generate updated app code based on new brief
                 prompt = f"""
@@ -313,31 +307,38 @@ MIT
                     updated_app_html = updated_app_html[:-3]
                 updated_app_html = updated_app_html.strip()
                 
-                # Overwrite app HTML
-                with open('index.html', 'w') as f:
-                    f.write(updated_app_html)
+                # Update app HTML
+                if not create_file_in_repo(repo_name, 'index.html', updated_app_html, f"Update for round {round_num}"):
+                    return jsonify({"error": "Failed to update index.html"}), 500
                 
                 # Update README.md
-                with open('README.md', 'a') as f:
-                    f.write(f"\n\n## Updates (Round {round_num})\n{brief}")
-                
-                # Commit and push changes
-                run_command("git add .")
-                run_command(f'git commit -m "Update for round {round_num}"')
-                run_command("git push origin main")
+                update_content = f"\n\n## Updates (Round {round_num})\n{brief}"
+                # Read existing README and append
+                headers = {
+                    'Authorization': f'token {GITHUB_TOKEN}',
+                    'Accept': 'application/vnd.github.v3+json',
+                }
+                readme_url = f'https://api.github.com/repos/{GITHUB_USER}/{repo_name}/contents/README.md'
+                response = requests.get(readme_url, headers=headers)
+                if response.status_code == 200:
+                    existing_content = base64.b64decode(response.json()['content']).decode()
+                    updated_readme = existing_content + update_content
+                    if not create_file_in_repo(repo_name, 'README.md', updated_readme, f"Update README for round {round_num}"):
+                        print("Warning: Failed to update README.md")
             
             # Get commit SHA
-            result = run_command("git rev-parse HEAD")
-            commit_sha = result.stdout.strip()
+            commit_sha = get_latest_commit_sha(repo_name)
+            if not commit_sha:
+                return jsonify({"error": "Failed to get commit SHA"}), 500
             
             pages_url = f'https://{GITHUB_USER}.github.io/{repo_name}/'
             
             print(f"Repository setup complete. Pages URL: {pages_url}")
             
-            # POST to evaluation URL with exact JSON structure and retry logic
+            # POST to evaluation URL
             payload = {
                 "email": email,
-                "task": task,  # Use original task name
+                "task": task,
                 "round": round_num,
                 "nonce": nonce,
                 "repo_url": f'https://github.com/{GITHUB_USER}/{repo_name}',
@@ -348,9 +349,9 @@ MIT
             print(f"Sending to evaluation URL: {evaluation_url}")
             print(f"Payload: {json.dumps(payload, indent=2)}")
             
-            # Retry logic with exponential backoff (1, 2, 4, 8... seconds)
-            delay = 8
-            max_delay = 600  # 10 minutes maximum
+            # Retry logic
+            delay = 16
+            max_delay = 600
             success = False
             
             while delay <= max_delay and not success:
@@ -375,17 +376,16 @@ MIT
                 if not success:
                     print(f"Retrying in {delay} seconds...")
                     time.sleep(delay)
-                    delay *= 2  # Exponential backoff
+                    delay *= 2
             
             if success:
                 return jsonify({"status": "success", "pages_url": pages_url}), 200
             else:
                 return jsonify({"error": "Failed to submit to evaluation URL after retries"}), 500
             
-        finally:
-            # Always return to original directory
-            os.chdir(original_dir)
-            print(f"Returned to original directory: {original_dir}")
+        except Exception as e:
+            print(f"Error in processing: {e}")
+            return jsonify({"error": str(e)}), 500
     
     except Exception as e:
         print(f"Error in handle_request: {e}")
