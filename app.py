@@ -73,7 +73,7 @@ def create_github_repo(repo_name):
         print(f"Failed to create repository: {e}")
         return False
 
-def create_file_in_repo(repo_name, file_path, content, commit_message):
+def create_file_in_repo(repo_name, file_path, content, commit_message, is_binary=False):
     """Create or update file in repository using GitHub API"""
     try:
         headers = {
@@ -89,9 +89,17 @@ def create_file_in_repo(repo_name, file_path, content, commit_message):
         if response.status_code == 200:
             sha = response.json().get('sha')
         
+        # Encode content to base64
+        if is_binary:
+            # For binary content, it's already bytes
+            content_b64 = base64.b64encode(content).decode()
+        else:
+            # For text content
+            content_b64 = base64.b64encode(content.encode()).decode()
+        
         data = {
             'message': commit_message,
-            'content': base64.b64encode(content.encode()).decode(),
+            'content': content_b64,
             'branch': 'main'
         }
         
@@ -260,17 +268,17 @@ MIT
                 if not create_file_in_repo(repo_name, 'index.html', app_html, "Add web application"):
                     return jsonify({"error": "Failed to create index.html"}), 500
                 
-                # Handle attachments via GitHub API
+                # Handle attachments via GitHub API ONLY - NO FILE SYSTEM
                 for att in attachments:
                     if att['url'].startswith('data:image/png;base64,'):
                         filename = att['name']
-                        print(f"Creating attachment: {filename}")
-                        # For base64 images, we can create them directly in the repo
-                        img_data = att['url'].split(',')[1]  # Get base64 data
-                        if create_file_in_repo(repo_name, filename, base64.b64decode(img_data).decode('latin-1'), f"Add {filename}"):
-                            print(f"Successfully created {filename}")
-                        else:
-                            print(f"Failed to create {filename}")
+                        print(f"Creating attachment via GitHub API: {filename}")
+                        # Extract base64 data and decode to binary
+                        base64_data = att['url'].split(',')[1]
+                        binary_data = base64.b64decode(base64_data)
+                        # Create image file directly via GitHub API
+                        if not create_file_in_repo(repo_name, filename, binary_data, f"Add {filename}", is_binary=True):
+                            print(f"Warning: Failed to create {filename} via GitHub API")
                 
                 print("GitHub Pages should be available automatically for public repositories")
             
@@ -310,21 +318,6 @@ MIT
                 # Update app HTML
                 if not create_file_in_repo(repo_name, 'index.html', updated_app_html, f"Update for round {round_num}"):
                     return jsonify({"error": "Failed to update index.html"}), 500
-                
-                # Update README.md
-                update_content = f"\n\n## Updates (Round {round_num})\n{brief}"
-                # Read existing README and append
-                headers = {
-                    'Authorization': f'token {GITHUB_TOKEN}',
-                    'Accept': 'application/vnd.github.v3+json',
-                }
-                readme_url = f'https://api.github.com/repos/{GITHUB_USER}/{repo_name}/contents/README.md'
-                response = requests.get(readme_url, headers=headers)
-                if response.status_code == 200:
-                    existing_content = base64.b64decode(response.json()['content']).decode()
-                    updated_readme = existing_content + update_content
-                    if not create_file_in_repo(repo_name, 'README.md', updated_readme, f"Update README for round {round_num}"):
-                        print("Warning: Failed to update README.md")
             
             # Get commit SHA
             commit_sha = get_latest_commit_sha(repo_name)
@@ -350,14 +343,14 @@ MIT
             print(f"Payload: {json.dumps(payload, indent=2)}")
             
             # Retry logic
-            delay = 16
+            delay = 8
             max_delay = 600
             success = False
             
             while delay <= max_delay and not success:
                 try:
                     response = requests.post(
-                        evaluation_url, 
+                        evaluation_url.strip(),  # Remove any whitespace
                         json=payload, 
                         headers={'Content-Type': 'application/json'},
                         timeout=30
